@@ -1,0 +1,546 @@
+Stage 1:
+-------
+
+what is the difference between instance and database:
+ Instance is temporary, exists only in RAM 
+  consists of shared global area - SGA and background processes 
+   when we shutdown instance vanishes
+ 
+ Database is permanent, physcial file sitting on /u01
+  stays even if the server is shutdown 
+
+[oracle@ol9-oracle26 ORCLCDB]$ ps -ef | grep pmon | grep -v grep
+oracle      2188       1  0 13:53 ?        00:00:00 ora_pmon_ORCLCDB
+[oracle@ol9-oracle26 ORCLCDB]$
+
+Process monitor - heart of the instance
+  
+SQL> sho sga
+
+Total System Global Area 2362677400 bytes
+Fixed Size                  5011608 bytes
+Variable Size             536870912 bytes
+Database Buffers         1811939328 bytes
+Redo Buffers                8855552 bytes
+SQL>
+
+Fixed size - bootstrap area, it contains internal metadata that oracle needs to find the rest of the SGA, small and static
+
+Variable size - shared pool(where sql code is parsed) and large pool (used for backup/restore operations)
+
+database buffers - important part of performance.
+copies of data blocks read from disk, when user asks for record oracle checks here first
+
+redo buffers - waiting room for changes.
+before the change is written to the physcial redo log files on disk it is temporary held here 
+
+SQL> SELECT file_name, tablespace_name, bytes/1024/1024 as MB FROM dba_data_files;
+
+FILE_NAME                                                              TABLESPACE_NAME                    MB
+---------------------------------------------------------------------- ------------------------------ ------
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_system_nr45ttdl_.dbf    SYSTEM                           1110
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_sysaux_nr45vjhx_.dbf    SYSAUX                            720
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_users_nr45vym5_.dbf     USERS                               7
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_undotbs1_nr45tsbp_.dbf  UNDOTBS1                           30
+
+SQL>
+
+SQL> SELECT name FROM v$controlfile;
+
+NAME
+------------------------------------------------------------------------------------------
+/u01/app/oracle/oradata/ORCLCDB/controlfile/o1_mf_nr45w3fm_.ctl
+/u01/app/oracle/fast_recovery_area/ORCLCDB/controlfile/o1_mf_nr45w3g7_.ctl
+
+SQL>
+
+SQL> SELECT member FROM v$logfile;
+
+MEMBER
+------------------------------------------------------------------------------------------
+/u01/app/oracle/oradata/ORCLCDB/onlinelog/o1_mf_3_nr45w3qs_.log
+/u01/app/oracle/fast_recovery_area/ORCLCDB/onlinelog/o1_mf_3_nr45w3z2_.log
+/u01/app/oracle/oradata/ORCLCDB/onlinelog/o1_mf_2_nr45w3qg_.log
+/u01/app/oracle/fast_recovery_area/ORCLCDB/onlinelog/o1_mf_2_nr45w404_.log
+/u01/app/oracle/oradata/ORCLCDB/onlinelog/o1_mf_1_nr45w3pc_.log
+/u01/app/oracle/fast_recovery_area/ORCLCDB/onlinelog/o1_mf_1_nr45w3z6_.log
+
+6 rows selected.
+
+SQL>
+
+Question: "If I pull the power plug on the server, what happens to the SGA and what happens to the Datafiles?"
+
+Your Answer: "The SGA is stored in volatile RAM, so it is instantly lost. However, the Datafiles are stored on persistent disk storage, so the data remains safe. When the server restarts, Oracle will use the Redo Logs to recover any changes that were in the RAM but hadn't yet been written to the Datafiles."
+
+looking the above, we can conclude database is using OMF (oracle managed files) and follows the multitenant architecture 
+
+tablespace vs datafiles:
+-----------------------
+tablespace (logical) where as the datafiles are the actual physcial file on the disk 
+
+1. Database   - the entire collection of data
+2. tablespace - a logical grouping ( SYSTEM, USERS)
+3. datafile   - the physcial .dbf file on the disk 
+
+we have 4 main tablespaces on our Database
+1. SYSTEM   - the brain, it stores the data dictionay (information about all other tables and users)
+2. SYSAUX   - the assistant, it stores auxiliary tools and history (like performance stats)
+3. USERS    - the workplace, where we create the own tables
+4. UNDOTBS1 - the time machine, stores before image of data, if we update a record and have not saved it yet, old value stays here
+
+SQL> CREATE TABLESPACE tranport_data
+  2  DATAFILE SIZE 50M
+  3  AUTOEXTEND ON NEXT 10M MAXSIZE 200M;
+
+Tablespace created.
+
+SQL> SELECT file_name, tablespace_name, bytes/1024/1024 as MB FROM dba_data_files;
+
+FILE_NAME                                                              TABLESPACE_NAME                    MB
+---------------------------------------------------------------------- ------------------------------ ------
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_system_nr45ttdl_.dbf    SYSTEM                           1110
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_sysaux_nr45vjhx_.dbf    SYSAUX                            720
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_users_nr45vym5_.dbf     USERS                               7
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_undotbs1_nr45tsbp_.dbf  UNDOTBS1                           30
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_tranport_nsfof97q_.dbf  TRANPORT_DATA                      50
+
+SQL>
+
+when we use create tablespace command on sql, oracle interacted with os to create a physcial file
+
+increase the limit to 500M
+
+SQL> ALTER DATABASE DATAFILE '/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_tranport_nsfof97q_.dbf'
+AUTOEXTEND ON MAXSIZE 500M;  2
+
+Database altered.
+
+SQL> SELECT file_name, bytes/1024/1024 as CURRENT_MB, maxbytes/1024/1024 as MAX_MB
+FROM dba_data_files
+WHERE tablespace_name = 'TRANPORT_DATA';  2    3
+
+FILE_NAME                                                              CURRENT_MB     MAX_MB
+---------------------------------------------------------------------- ---------- ----------
+/u01/app/oracle/oradata/ORCLCDB/datafile/o1_mf_tranport_nsfof97q_.dbf          50        500
+
+SQL> 
+
+A tablespace can have multiple datafiles but datafile can only belong to one tablespace
+
+if we hit limit after extenting it to 500M
+we have two options
+1. extend again 
+2. add new datafile
+
+--------------
+Storage intelligence
+ 1. HWM - High water mark
+ --------------------
+  If we delete all the data in the table, does the datafile srink
+   NO, oracle uses high water mark
+    when we add data, HWM moves up and oracle claims the space from OS
+	when we delete data HWM stays where it is, space inside the file becomes empty (fragemented), but the file on the os remains the same
+	
+ 2. Data dictionay vs OS
+ ----------------------
+  current_mb=50
+  we go to linux and check, os will report 50MB
+  500MB max_mb is the promise stored in the data dictionay (system tablespace) , os has no idea that the file can grow till 500MB till oracle requests extra bytes
+  
+SELECT 
+    df.tablespace_name,
+    df.total_mb,
+    nvl(fs.free_mb, 0) as free_mb,
+    df.total_mb - nvl(fs.free_mb, 0) as used_mb,
+    round((df.total_mb - nvl(fs.free_mb, 0)) / df.total_mb * 100, 2) as pct_used
+FROM 
+    (SELECT tablespace_name, sum(bytes)/1024/1024 as total_mb FROM dba_data_files GROUP BY tablespace_name) df
+LEFT JOIN 
+    (SELECT tablespace_name, sum(bytes)/1024/1024 as free_mb FROM dba_free_space GROUP BY tablespace_name) fs
+ON df.tablespace_name = fs.tablespace_name;
+
+SQL> SELECT
+    df.tablespace_name,
+    df.total_mb,
+    nvl(fs.free_mb, 0) as free_mb,
+    df.total_mb - nvl(fs.free_mb, 0) as used_mb,
+    round((df.total_mb - nvl(fs.free_mb, 0)) / df.total_mb * 100, 2) as pct_used
+FROM
+    (SELECT tablespace_name, sum(bytes)/1024/1024 as total_mb FROM dba_data_files GROUP BY tablespace_name) df
+LEFT JOIN
+    (SELECT tablespace_name, sum(bytes)/1024/1024 as free_mb FROM dba_free_space GROUP BY tablespace_name) fs
+ON df.tablespace_name = fs.tablespace_name;  2    3    4    5    6    7    8    9   10   11
+
+TABLESPACE_NAME                  TOTAL_MB    FREE_MB    USED_MB   PCT_USED
+------------------------------ ---------- ---------- ---------- ----------
+SYSTEM                               1110     2.0625  1107.9375      99.81
+SYSAUX                                720     41.625    678.375      94.22
+UNDOTBS1                               30      .1875    29.8125      99.38
+USERS                                   7      .9375     6.0625      86.61
+TRANPORT_DATA                          50    43.9375     6.0625      12.13
+
+SQL>
+
+The dba_free_space view only shows space that has never been used or space that has been formatted for reuse
+It does not accout for MAXXSIZE potential growth - only looks at the space currently allocated on the disk 
+
+we just created a tablespace transport_data and not created any table yet , but 6MB is already used
+ oracle pre-allocated a samll amount of space for Bitmap (a map that keeps track of which blocks are free) and the firs few Extents
+ 
+============
+security and access
+-------------------
+trinity of security
+ 1. user       - who are they 
+ 2. privilege  - what can they do 
+ 3. quota      - how much of our new tablspace can they actually use
+ 
+creating a tranport admin 
+--------------------------
+SQL> sho pdbs;
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 ORCLPDB1                       MOUNTED
+SQL>
+SQL> CREATE USER transport_admin
+  2  IDENTIFIED BY Oracle_123
+  3  DEFAULT TABLESPACE transport_data;
+CREATE USER transport_admin
+            *
+ERROR at line 1:
+ORA-65096: common user or role name must start with prefix C##
+Help: https://docs.oracle.com/error-help/db/ora-65096/
+
+
+SQL>
+
+
+In the multitenant architecture, 
+1. common user(C##) - a global user that exists in the root(CDB) and all PDBs
+2. LOcal user       - A user that only exists inside a specific pdb
+
+SQL> ALTER PLUGGABLE DATABASE orclpdb1 OPEN;
+
+Pluggable database altered.
+
+SQL> sho pdbs;
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 ORCLPDB1                       READ WRITE NO
+
+SQL> sho con_name;
+
+CON_NAME
+------------------------------
+ORCLPDB1
+SQL> CREATE TABLESPACE transport_data DATAFILE SIZE 50M;
+
+Tablespace created.
+
+SQL> CREATE USER transport_admin
+IDENTIFIED BY Oracle_123
+DEFAULT TABLESPACE transport_data;  2    3
+
+User created.
+
+SQL>
+
+Q: I am getting ORA-65096 when trying to create a user, how do i fix it without using C##
+
+A: error happens becuase you are connected to CDB root. application users should be local users.
+
+Important architecture points:
+-----------------------------
+Multitenant architecture, the CDB and PDB are physically and logically isolated.
+separate control file and separate data dictionay
+
+[oracle@ol9-oracle26 ~]$ sqlplus transport_admin/Oracle_123@localhost:1521/ORCLPDB1
+
+SQL*Plus: Release 23.26.1.0.0 - Production on Thu Feb 19 19:04:43 2026
+Version 23.26.1.0.0
+
+Copyright (c) 1982, 2025, Oracle.  All rights reserved.
+
+ERROR:
+ORA-12541: Cannot connect. No listener at host 127.0.0.1 port 1521.
+Help: https://docs.oracle.com/error-help/db/ora-12541/
+
+
+Enter user-name: ^C
+[oracle@ol9-oracle26 ~]$
+
+previously we connected via LOCAL IPS (inter process communication) becuase we logged in directly as oracle on the server 
+but when we use @localhost:1521/ORACLPDB1 - we are asking oracle to use the Network stack
+
+ora-12541 (no listenr)
+Listener
+--------
+ separate process that sits outside the database, its only job is to listen for incoming network requests and hand them off to the database
+ if Listener is down, we cannot connect via network, even if Database is open
+ 
+we will start
+------------
+[oracle@ol9-oracle26 ~]$ lsnrctl status
+
+LSNRCTL for Linux: Version 23.26.1.0.0 - Production on 19-FEB-2026 19:09:13
+
+Copyright (c) 1991, 2026, Oracle.  All rights reserved.
+
+Connecting to (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=ol9-oracle26)(PORT=1521)))
+TNS-12541: Cannot connect. No listener at host ol9-oracle26 port 1521.
+ TNS-12560: Database communication protocol error.
+  TNS-00511: No listener
+   Linux Error: 111: Connection refused
+Connecting to (DESCRIPTION=(ADDRESS=(PROTOCOL=IPC)(KEY=EXTPROC1521)))
+TNS-12541: Cannot connect. No listener at key EXTPROC1521.
+ TNS-12560: Database communication protocol error.
+  TNS-00511: No listener
+   Linux Error: 111: Connection refused
+[oracle@ol9-oracle26 ~]$
+
+[oracle@ol9-oracle26 ~]$ lsnrctl start
+
+LSNRCTL for Linux: Version 23.26.1.0.0 - Production on 19-FEB-2026 19:10:12
+
+Copyright (c) 1991, 2026, Oracle.  All rights reserved.
+
+Starting /u01/app/oracle/product/26ai/dbhome_1/bin/tnslsnr: please wait...
+
+TNSLSNR for Linux: Version 23.26.1.0.0 - Production
+System parameter file is /u01/app/oracle/product/26ai/dbhome_1/network/admin/listener.ora
+Log messages written to /u01/app/oracle/diag/tnslsnr/ol9-oracle26/listener/alert/log.xml
+Listening on: (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=ol9-oracle26)(PORT=1521)))
+Listening on: (DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=EXTPROC1521)))
+
+Connecting to (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=ol9-oracle26)(PORT=1521)))
+STATUS of the LISTENER
+------------------------
+Alias                     LISTENER
+Version                   TNSLSNR for Linux: Version 23.26.1.0.0 - Production
+Start Date                19-FEB-2026 19:10:14
+Uptime                    0 days 0 hr. 0 min. 10 sec
+Trace Level               off
+Security                  ON: Local OS Authentication
+SNMP                      OFF
+Listener Parameter File   /u01/app/oracle/product/26ai/dbhome_1/network/admin/listener.ora
+Listener Log File         /u01/app/oracle/diag/tnslsnr/ol9-oracle26/listener/alert/log.xml
+Listening Endpoints Summary...
+  (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=ol9-oracle26)(PORT=1521)))
+  (DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=EXTPROC1521)))
+The listener supports no services
+The command completed successfully
+[oracle@ol9-oracle26 ~]$ lsnrctl status
+
+LSNRCTL for Linux: Version 23.26.1.0.0 - Production on 19-FEB-2026 19:10:48
+
+Copyright (c) 1991, 2026, Oracle.  All rights reserved.
+
+Connecting to (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=ol9-oracle26)(PORT=1521)))
+STATUS of the LISTENER
+------------------------
+Alias                     LISTENER
+Version                   TNSLSNR for Linux: Version 23.26.1.0.0 - Production
+Start Date                19-FEB-2026 19:10:14
+Uptime                    0 days 0 hr. 0 min. 33 sec
+Trace Level               off
+Security                  ON: Local OS Authentication
+SNMP                      OFF
+Listener Parameter File   /u01/app/oracle/product/26ai/dbhome_1/network/admin/listener.ora
+Listener Log File         /u01/app/oracle/diag/tnslsnr/ol9-oracle26/listener/alert/log.xml
+Listening Endpoints Summary...
+  (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=ol9-oracle26)(PORT=1521)))
+  (DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=EXTPROC1521)))
+Services Summary...
+Service "49ee4e0b2b27138be063087aa8c05059" has 1 instance(s).
+  Instance "ORCLCDB", status READY, has 1 handler(s) for this service...
+Service "ORCLCDB" has 1 instance(s).
+  Instance "ORCLCDB", status READY, has 1 handler(s) for this service...
+Service "ORCLCDBXDB" has 1 instance(s).
+  Instance "ORCLCDB", status READY, has 1 handler(s) for this service...
+Service "orclpdb1" has 1 instance(s).
+  Instance "ORCLCDB", status READY, has 1 handler(s) for this service...
+The command completed successfully
+[oracle@ol9-oracle26 ~]$
+
+[oracle@ol9-oracle26 ~]$ sqlplus transport_admin/Oracle_123@localhost:1521/ORCLPDB1
+
+SQL*Plus: Release 23.26.1.0.0 - Production on Thu Feb 19 20:02:36 2026
+Version 23.26.1.0.0
+
+Copyright (c) 1982, 2025, Oracle.  All rights reserved.
+
+ERROR:
+ORA-01045: Login denied. User TRANSPORT_ADMIN does not have CREATE SESSION
+privilege.
+Help: https://docs.oracle.com/error-help/db/ora-01045/
+
+
+Enter user-name: ^C
+[oracle@ol9-oracle26 ~]$
+
+
+SQL> GRANT CREATE SESSION TO transport_admin;
+
+Grant succeeded.
+
+SQL> show user;
+USER is "SYS"
+SQL> sho con_name;
+
+CON_NAME
+------------------------------
+ORCLPDB1
+SQL>
+
+[oracle@ol9-oracle26 ~]$ sqlplus transport_admin/Oracle_123@localhost:1521/ORCLPDB1
+
+SQL*Plus: Release 23.26.1.0.0 - Production on Thu Feb 19 20:06:28 2026
+Version 23.26.1.0.0
+
+Copyright (c) 1982, 2025, Oracle.  All rights reserved.
+
+
+Connected to:
+Oracle AI Database 26ai Enterprise Edition Release 23.26.1.0.0 - Production
+Version 23.26.1.0.0
+
+SQL> sho user;
+USER is "TRANSPORT_ADMIN"
+SQL> sho con_name;
+
+CON_NAME
+------------------------------
+ORCLPDB1
+SQL> CREATE TABLE vehicles (
+    id NUMBER PRIMARY KEY,
+    model VARCHAR2(50)
+);  2    3    4
+CREATE TABLE vehicles (
+*
+ERROR at line 1:
+ORA-01031: insufficient privileges
+Help: https://docs.oracle.com/error-help/db/ora-01031/
+
+
+SQL>
+
+we need to have 
+system privilege - power to run create table 
+quota            - permission to occupy space in the transport_data tablespace
+
+SQL> sho pdbs;
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 ORCLPDB1                       READ WRITE NO
+SQL>
+SQL> alter session set container = orclpdb1;
+
+Session altered.
+
+SQL>
+SQL>
+SQL>
+SQL> GRANT CREATE TABLE TO transport_admin;
+
+Grant succeeded.
+
+SQL> ALTER USER transport_admin QUOTA UNLIMITED ON transport_data;
+
+User altered.
+
+SQL>
+
+[oracle@ol9-oracle26 ~]$ sqlplus transport_admin/Oracle_123@localhost:1521/ORCLPDB1
+
+SQL*Plus: Release 23.26.1.0.0 - Production on Thu Feb 19 20:12:21 2026
+Version 23.26.1.0.0
+
+Copyright (c) 1982, 2025, Oracle.  All rights reserved.
+
+Last Successful login time: Thu Feb 19 2026 20:06:28 +05:30
+
+Connected to:
+Oracle AI Database 26ai Enterprise Edition Release 23.26.1.0.0 - Production
+Version 23.26.1.0.0
+
+SQL> sho user;
+USER is "TRANSPORT_ADMIN"
+SQL> sho pdbs;
+SP2-0382: The SHOW PDBS command is not available
+Help: https://docs.oracle.com/error-help/db/sp2-0382/
+SQL> sho con_name;
+
+CON_NAME
+------------------------------
+ORCLPDB1
+SQL>
+SQL> CREATE TABLE vehicles (
+    id NUMBER PRIMARY KEY,
+    model VARCHAR2(50)
+);  2    3    4
+
+Table created.
+
+SQL>
+
+
+SP2-0382 
+is a command for cdb admin to see all the tenants, as a local user we are restricted to our own pdb can't see others
+
+=============================
+
+The logical layer:
+----------------
+The hierarchy of storage:
+Block    - smallest unit - usally 8KB
+Extent   - group of contiguous blocks
+segment  - a set of extents that belongs to specific object 
+
+we need to find where the onject is stored physically 
+
+SQL> SELECT segment_name, segment_type, tablespace_name, blocks, bytes/1024 as KB
+FROM user_segments
+WHERE segment_name = 'VEHICLES';  2    3
+
+no rows selected
+
+SQL> INSERT INTO vehicles (id, model) VALUES (1, 'Toyota Corolla');
+COMMIT;
+1 row created.
+
+SQL> SELECT segment_name, segment_type, tablespace_name, blocks, bytes/1024 as KB
+FROM user_segments
+WHERE segment_name = 'VEHICLES';  2    3
+COMMIT;SELECT segment_name, segment_type, tablespace_name, blocks, bytes/1024 as KB
+       *
+ERROR at line 1:
+ORA-03405: End of query reached; no additional text should follow.
+Help: https://docs.oracle.com/error-help/db/ora-03405/
+
+
+SQL>
+
+
+SQL> SELECT extent_id, bytes/1024 as KB, blocks
+FROM user_extents
+WHERE segment_name = 'VEHICLES';  2    3
+
+ EXTENT_ID         KB     BLOCKS
+---------- ---------- ----------
+         0         64          8
+
+SQL>
+
+Question: "I created 1,000 tables for a new app, but my dba_free_space didn't change at all. Why?"
+
+Your Answer: "You likely have Deferred Segment Creation enabled. Oracle won't allocate the physical segments (extents) until the first row is inserted into those tables. This keeps the datafiles lean until they are actually used."
+
+
+
